@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI 批量消除工作台（去AI水印 / 去路人 / 去字幕）</title>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel-2: #1f2430;
+    --border: #2a3040;
+    --text: #eef1f7;
+    --muted: #9aa3b5;
+    --accent: #6366f1;
+    --accent-hover: #4f46e5;
+    --green: #10b981;
+    --red: #ef4444;
+    --amber: #f59e0b;
+  }
+  * { box-sizing: border-box; user-select: none; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(23, 26, 35, 0.94);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    justify-content: space-between;
+  }
+  .brand {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+  .brand h1 { margin: 0; font-size: 16px; font-weight: 700; }
+  .privacy-pill {
+    font-size: 11px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: rgba(99, 102, 241, 0.14);
+    color: #c7d2fe;
+    border: 1px solid rgba(99, 102, 241, 0.32);
+  }
+  .badge {
+    font-size: 11px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+  }
+  .badge.loading {
+    background: rgba(245, 158, 11, 0.16);
+    color: #fcd34d;
+    border-color: rgba(245, 158, 11, 0.35);
+  }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+  .tool-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    padding: 5px 10px;
+    border-radius: 10px;
+    font-size: 13px;
+  }
+  button {
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    padding: 7px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  button:hover:not(:disabled) { border-color: #4b556b; background: #272d3c; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+  button.success { background: var(--green); border-color: var(--green); color: #fff; }
+  button.success:hover:not(:disabled) { background: #059669; }
+  button.active-mode { background: rgba(99, 102, 241, 0.25); border-color: var(--accent); color: #c7d2fe; }
+  button.danger { color: #fca5a5; }
+  input[type="range"] { width: 86px; accent-color: var(--accent); }
+  select.fmt-select {
+    background: transparent; color: var(--text); border: none; font-size: 12px; outline: none; cursor: pointer;
+  }
+  select.fmt-select option { background: var(--panel); color: var(--text); }
+  main { flex: 1; padding: 20px; max-width: 1680px; width: 100%; margin: 0 auto; }
+  .model-banner {
+    display: none;
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.35);
+    border-radius: 12px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+  }
+  .model-banner.show { display: block; }
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 16px;
+    padding: 44px 20px;
+    text-align: center;
+    background: rgba(23, 26, 35, 0.6);
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-bottom: 18px;
+  }
+  .dropzone.compact { padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; text-align: left; }
+  .dropzone.dragover { border-color: var(--accent); background: rgba(99, 102, 241, 0.1); }
+  .dropzone h2 { margin: 0 0 6px; font-size: 18px; }
+  .dropzone p { margin: 0; color: var(--muted); font-size: 13px; }
+  .hint-bar {
+    font-size: 12px; color: var(--muted); margin-bottom: 12px;
+    display: none; flex-wrap: wrap; gap: 14px; align-items: center;
+  }
+  .hint-bar strong { color: #c7d2fe; }
+  .template-bar {
+    display: none; flex-wrap: wrap; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 14px; margin-bottom: 14px; font-size: 12px;
+  }
+  .template-bar.show { display: flex; }
+  .template-bar .label { color: var(--muted); font-weight: 600; margin-right: 4px; }
+  .tpl-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 10px; font-size: 12px; color: var(--text); cursor: pointer; transition: all 0.15s;
+  }
+  .tpl-chip:hover { border-color: var(--accent); background: rgba(99, 102, 241, 0.16); }
+  .tpl-chip .del-tpl { margin-left: 3px; color: var(--muted); font-weight: bold; padding: 0 2px; }
+  .tpl-chip .del-tpl:hover { color: #f87171; }
+  .tpl-box-actions {
+    display: none; align-items: center; gap: 6px; margin-left: auto;
+    padding-left: 10px; border-left: 1px solid var(--border);
+  }
+  .tpl-box-actions.show { display: inline-flex; flex-wrap: wrap; }
+  .tpl-box-actions button { padding: 4px 10px; font-size: 12px; }
+  .progress-wrap {
+    display: none; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 16px; margin-bottom: 16px;
+  }
+  .progress-wrap.show { display: block; }
+  .progress-top { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px; }
+  .progress-bar-bg { height: 8px; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
+  .progress-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--green)); transition: width 0.2s ease; }
+  .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+  .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .grid, .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    overflow: hidden; display: flex; flex-direction: column; transition: border-color 0.2s;
+  }
+  .card.processing { border-color: var(--amber); }
+  .card.done { border-color: rgba(16, 185, 129, 0.6); }
+  .card-header {
+    padding: 10px 12px; display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; border-bottom: 1px solid var(--border); font-size: 12px;
+  }
+  .card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .status-pill {
+    flex-shrink: 0; font-size: 11px; padding: 2px 7px; border-radius: 999px;
+    background: var(--panel-2); color: var(--muted);
+  }
+  .status-pill.masked { background: rgba(99, 102, 241, 0.2); color: #a5b4fc; }
+  .status-pill.processing { background: rgba(245, 158, 11, 0.2); color: #fcd34d; }
+  .status-pill.done { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+  .status-pill.error { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
+  .canvas-stage {
+    position: relative; background: #0b0d12;
+    background-image:
+      linear-gradient(45deg, #141822 25%, transparent 25%),
+      linear-gradient(-45deg, #141822 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #141822 75%),
+      linear-gradient(-45deg, transparent 75%, #141822 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 240px; max-height: 360px; overflow: hidden;
+  }
+  .canvas-wrapper { position: relative; display: inline-block; line-height: 0; }
+  .canvas-wrapper canvas { display: block; max-width: 100%; max-height: 360px; width: auto; height: auto; }
+  .mask-canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; opacity: 0.58; pointer-events: auto; }
+  body.mode-brush .mask-canvas, body.mode-eraser .mask-canvas { cursor: none; }
+  body.mode-rect .mask-canvas { cursor: crosshair; }
+  .brush-cursor {
+    position: fixed; top: 0; left: 0; border-radius: 50%;
+    border: 2px solid rgba(255, 42, 85, 0.95);
+    background: rgba(255, 42, 85, 0.22);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85), inset 0 0 0 1px rgba(255, 255, 255, 0.45);
+    pointer-events: none; transform: translate(-50%, -50%); z-index: 9999; display: none;
+  }
+  .brush-cursor.eraser {
+    border: 2px dashed rgba(255, 255, 255, 0.95);
+    background: rgba(255, 255, 255, 0.14);
+    box-shadow: 0 0 0 1px rgba(15, 17, 23, 0.9);
+  }
+  .tpl-box {
+    position: absolute; border: 2px solid #ff2a55;
+    background: rgba(255, 42, 85, 0.34);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9), 0 0 12px rgba(255, 42, 85, 0.45);
+    cursor: move; z-index: 15; display: none; touch-action: none;
+  }
+  .tpl-box.active { display: block; }
+  .tpl-handle {
+    position: absolute; width: 11px; height: 11px; background: #fff;
+    border: 2px solid #ff2a55; border-radius: 50%; z-index: 16;
+  }
+  .tpl-handle.nw { left: -6px; top: -6px; cursor: nwse-resize; }
+  .tpl-handle.ne { right: -6px; top: -6px; cursor: nesw-resize; }
+  .tpl-handle.sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+  .tpl-handle.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+  .tpl-handle.n  { left: 50%; top: -6px; transform: translateX(-50%); cursor: ns-resize; }
+  .tpl-handle.s  { left: 50%; bottom: -6px; transform: translateX(-50%); cursor: ns-resize; }
+  .tpl-handle.w  { left: -6px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+  .tpl-handle.e  { right: -6px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+  .card-actions {
+    padding: 9px 10px; border-top: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; align-items: center;
+  }
+  .card-actions .left, .card-actions .right { display: flex; flex-wrap: wrap; gap: 5px; }
+  .card-actions button { padding: 4px 8px; font-size: 12px; border-radius: 6px; }
+  .modal-backdrop {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: rgba(0, 0, 0, 0.82); backdrop-filter: blur(6px);
+    align-items: center; justify-content: center; padding: 24px;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+    max-width: 92vw; max-height: 92vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-header {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  }
+  .modal-body { padding: 16px; overflow: auto; display: flex; justify-content: center; align-items: center; background: #0b0d12; }
+  .modal-body .canvas-wrapper canvas { max-height: 74vh; max-width: 85vw; }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: #1f2937; color: #fff; border: 1px solid #374151;
+    padding: 10px 18px; border-radius: 10px; font-size: 13px;
+    opacity: 0; pointer-events: none; transition: all 0.2s ease; z-index: 200;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body class="mode-brush">
+<div id="brushCursor" class="brush-cursor"></div>
+
+<header>
+  <div class="brand">
+    <h1>AI 批量消除工作台</h1>
+    <span class="privacy-pill">🔒 纯浏览器本地 AI · 图片绝不上传服务器 · 永不覆盖原图</span>
+    <span id="engineStatus" class="badge">首次消除自动加载本地 AI 模型</span>
+  </div>
+  <div class="toolbar">
+    <div class="tool-group">
+      <button id="modeBrush" class="active-mode" title="自由涂抹水印/路人/字幕">🖌️ 画笔</button>
+      <button id="modeRect" title="拉框盖住角落文字/Logo水印">⬜ 框选</button>
+      <button id="modeEraser" title="擦除涂错的红色区域">🧹 橡皮擦</button>
+    </div>
+    <div class="tool-group">
+      <span>笔刷</span>
+      <input type="range" id="brushSize" min="8" max="120" value="36" />
+      <span id="brushVal">36px</span>
+    </div>
+    <div class="tool-group">
+      <span>每行</span>
+      <button class="col-btn" data-cols="2">2张</button>
+      <button class="col-btn active-mode" data-cols="3">3张</button>
+      <button class="col-btn" data-cols="4">4张</button>
+    </div>
+    <div class="tool-group" title="导出图片格式（绝不覆盖原图）">
+      <span>导出</span>
+      <select id="exportFormat" class="fmt-select">
+        <option value="jpg" selected>JPG (推荐·体积小)</option>
+        <option value="png">PNG (无损画质)</option>
+      </select>
+    </div>
+    <button id="btnAddMore">➕ 选图</button>
+    <button id="btnAddFolder">📁 导文件夹</button>
+    <button id="btnAutoDetect" disabled title="上传 2 张及以上含相同固定水印的图片，自动锁定共同水印位置">🤖 自动检测水印</button>
+    <button id="btnRetryFailed" style="display:none; border-color: var(--amber); color: #fcd34d;">🔄 重试失败项</button>
+    <button id="btnRunAll" class="primary" disabled>🚀 一键批量消除</button>
+    <button id="btnDownloadZip" class="success" disabled>📦 打包下载 (ZIP)</button>
+    <button id="btnClearAll" class="danger" disabled>🗑️ 清空</button>
+  </div>
+</header>
+
+<main>
+  <input type="file" id="fileInput" accept="image/*" multiple hidden />
+  <input type="file" id="folderInput" webkitdirectory directory multiple hidden />
+
+  <div id="modelBanner" class="model-banner">
+    <div class="progress-top">
+      <span id="modelBannerText">正在准备本地浏览器 AI 模型...</span>
+      <span id="modelBannerPct">0%</span>
+    </div>
+    <div class="progress-bar-bg">
+      <div id="modelBannerFill" class="progress-bar-fill"></div>
+    </div>
+  </div>
+
+  <div id="dropzone" class="dropzone">
+    <div>
+      <h2>拖拽多张图片到这里，或点击选择 · 支持「去 AI 水印 / 去路人 / 去字幕 / 去瑕疵」</h2>
+      <p>支持 <strong>Ctrl/Cmd + V 直接粘贴截图</strong> · 支持 <strong>导入整个文件夹</strong> · 纯浏览器本地推理，原图零上传、永久在线</p>
+    </div>
+  </div>
+
+  <div id="hintBar" class="hint-bar">
+    <span>💡 <strong>快捷键</strong>：<code>Ctrl/Cmd+V</code> 粘贴截图 · <code>Ctrl/Cmd+Z</code> 撤销 · <code>[</code> / <code>]</code> 调整笔刷。</span>
+    <span>💡 <strong>固定 AI 水印</strong>：上传多张图后直接点 <strong>「🤖 自动检测水印」</strong>，或点下方可调模板红框全图同步！</span>
+  </div>
+
+  <div id="templateBar" class="template-bar">
+    <span class="label">📌 水印模板（点选后可直接拖动/缩放红框，全图实时同步）：</span>
+    <div id="templateList" style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;"></div>
+    <div id="tplBoxActions" class="tpl-box-actions">
+      <button id="btnConfirmTplBox" class="primary">✅ 确认框选</button>
+      <button id="btnSaveTplBox">💾 保存为新模板</button>
+      <button id="btnCancelTplBox" class="danger">✕ 取消选框</button>
+    </div>
+  </div>
+
+  <div id="progressWrap" class="progress-wrap">
+    <div class="progress-top">
+      <span id="progressText">准备处理...</span>
+      <span id="progressCount">0 / 0</span>
+    </div>
+    <div class="progress-bar-bg">
+      <div id="progressFill" class="progress-bar-fill"></div>
+    </div>
+  </div>
+
+  <div id="grid" class="grid cols-3"></div>
+</main>
+
+<div id="modalBackdrop" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-header">
+      <strong id="modalTitle">放大精修</strong>
+      <div style="display:flex; gap:8px;">
+        <button id="modalUndo">↩ 撤销</button>
+        <button id="modalClearMask">清除涂抹</button>
+        <button id="modalSyncAll">📋 同步此涂抹到全部</button>
+        <button id="modalRunOne" class="primary">✨ 立即消除</button>
+        <button id="modalClose">关闭</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="canvas-wrapper">
+        <canvas id="modalImgCanvas"></canvas>
+        <canvas id="modalMaskCanvas" class="mask-canvas"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script type="module">
+import { inpaintInBrowser, detectCommonWatermarkInBrowser, ensureModelLoaded } from './ai-engine.js';
+
+const state = {
+  items: [],
+  mode: 'brush',
+  brushSize: 36,
+  isRunning: false,
+  modalItemId: null,
+  lastActiveItemId: null,
+  tplBox: { active: false, x: 0.72, y: 0.88, w: 0.26, h: 0.10 },
+};
+let nextId = 1;
+
+const $ = (id) => document.getElementById(id);
+const grid = $('grid');
+const dropzone = $('dropzone');
+const fileInput = $('fileInput');
+const folderInput = $('folderInput');
+const brushCursor = $('brushCursor');
+
+function showToast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 2800);
+}
+
+function handleModelStatus(stage, text, pct) {
+  const badge = $('engineStatus');
+  const banner = $('modelBanner');
+  badge.textContent = text;
+  badge.classList.toggle('loading', stage !== 'ready');
+  if (stage === 'downloading' || stage === 'caching' || stage === 'initializing') {
+    banner.classList.add('show');
+    $('modelBannerText').textContent = text;
+    $('modelBannerPct').textContent = (pct ?? 0) + '%';
+    $('modelBannerFill').style.width = (pct ?? 0) + '%';
+  } else if (stage === 'ready') {
+    banner.classList.remove('show');
+  }
+}
+
+// Brush cursor & modes
+function updateBrushCursorSize() {
+  brushCursor.style.width = state.brushSize + 'px';
+  brushCursor.style.height = state.brushSize + 'px';
+}
+updateBrushCursorSize();
+
+function setMode(m) {
+  state.mode = m;
+  document.body.classList.toggle('mode-brush', m === 'brush');
+  document.body.classList.toggle('mode-rect', m === 'rect');
+  document.body.classList.toggle('mode-eraser', m === 'eraser');
+  $('modeBrush').classList.toggle('active-mode', m === 'brush');
+  $('modeRect').classList.toggle('active-mode', m === 'rect');
+  $('modeEraser').classList.toggle('active-mode', m === 'eraser');
+  brushCursor.classList.toggle('eraser', m === 'eraser');
+  if (m === 'rect') brushCursor.style.display = 'none';
+}
+$('modeBrush').onclick = () => setMode('brush');
+$('modeRect').onclick = () => setMode('rect');
+$('modeEraser').onclick = () => setMode('eraser');
+$('brushSize').oninput = (e) => {
+  state.brushSize = Number(e.target.value);
+  $('brushVal').textContent = state.brushSize + 'px';
+  updateBrushCursorSize();
+};
+
+document.querySelectorAll('.col-btn').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.col-btn').forEach(b => b.classList.remove('active-mode'));
+    btn.classList.add('active-mode');
+    grid.className = 'grid cols-' + btn.dataset.cols;
+  };
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    const targetId = state.modalItemId || state.lastActiveItemId;
+    const target = state.items.find(x => x.id === targetId);
+    if (target) undoItemMask(target);
+    return;
+  }
+  if (e.key === '[') {
+    state.brushSize = Math.max(8, state.brushSize - 6);
+    $('brushSize').value = state.brushSize;
+    $('brushVal').textContent = state.brushSize + 'px';
+    updateBrushCursorSize();
+  } else if (e.key === ']') {
+    state.brushSize = Math.min(120, state.brushSize + 6);
+    $('brushSize').value = state.brushSize;
+    $('brushVal').textContent = state.brushSize + 'px';
+    updateBrushCursorSize();
+  }
+});
+
+document.addEventListener('pointermove', (e) => {
+  if (state.mode !== 'brush' && state.mode !== 'eraser') {
+    brushCursor.style.display = 'none';
+    return;
+  }
+  const overMask = e.target && e.target.classList && e.target.classList.contains('mask-canvas');
+  if (overMask) {
+    brushCursor.style.display = 'block';
+    brushCursor.style.left = e.clientX + 'px';
+    brushCursor.style.top = e.clientY + 'px';
+  } else {
+    brushCursor.style.display = 'none';
+  }
+});
+document.addEventListener('pointerleave', () => { brushCursor.style.display = 'none'; });
+
+document.addEventListener('paste', (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  const pastedFiles = [];
+  const now = new Date();
+  const stamp = [now.getHours(), now.getMinutes(), now.getSeconds()].map(n => String(n).padStart(2, '0')).join('');
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].type && items[i].type.startsWith('image/')) {
+      const blob = items[i].getAsFile();
+      if (blob) {
+        const ext = (blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+        pastedFiles.push(new File([blob], `剪贴板截图_${stamp}_${i + 1}.${ext}`, { type: blob.type }));
+      }
+    }
+  }
+  if (pastedFiles.length) {
+    addFiles(pastedFiles);
+    showToast(`已从剪贴板粘贴 ${pastedFiles.length} 张图片`);
+  }
+});
+
+window.addEventListener('beforeunload', (e) => {
+  if (state.items.length > 0) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+// Upload & Drag-Drop
+dropzone.onclick = () => fileInput.click();
+$('btnAddMore').onclick = () => fileInput.click();
+$('btnAddFolder').onclick = () => folderInput.click();
+fileInput.onchange = (e) => { if (e.target.files.length) addFiles(e.target.files); fileInput.value = ''; };
+folderInput.onchange = (e) => {
+  if (e.target.files.length) {
+    const imgs = Array.from(e.target.files).filter(f => f.type.startsWith('image/'));
+    if (imgs.length) { addFiles(imgs); showToast(`已从文件夹导入 ${imgs.length} 张图片`); }
+    else showToast('该文件夹内未找到支持的图片文件');
+  }
+  folderInput.value = '';
+};
+['dragenter', 'dragover'].forEach(evt => dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.add('dragover'); }));
+['dragleave', 'drop'].forEach(evt => dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); }));
+dropzone.addEventListener('drop', (e) => { if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
+
+function addFiles(fileList) {
+  const files = Array.from(fileList).filter(f => f.type.startsWith('image/'));
+  if (!files.length) return;
+  files.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => createItem(file.name, img, ev.target.result);
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function createItem(name, img, origDataUrl) {
+  const id = nextId++;
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="card-header">
+      <span class="card-title" title="${name}">${name} (${img.width}×${img.height})</span>
+      <span class="status-pill" data-role="status">待涂抹</span>
+    </div>
+    <div class="canvas-stage">
+      <div class="canvas-wrapper">
+        <canvas data-role="img"></canvas>
+        <canvas data-role="mask" class="mask-canvas"></canvas>
+        <div class="tpl-box" data-role="tplBox">
+          <span class="tpl-handle nw" data-dir="nw"></span>
+          <span class="tpl-handle ne" data-dir="ne"></span>
+          <span class="tpl-handle sw" data-dir="sw"></span>
+          <span class="tpl-handle se" data-dir="se"></span>
+          <span class="tpl-handle n" data-dir="n"></span>
+          <span class="tpl-handle s" data-dir="s"></span>
+          <span class="tpl-handle w" data-dir="w"></span>
+          <span class="tpl-handle e" data-dir="e"></span>
+        </div>
+      </div>
+    </div>
+    <div class="card-actions">
+      <div class="left">
+        <button data-act="sync" title="把这张图的涂抹位置按比例同步到所有图片">📋 同步到全部</button>
+        <button data-act="saveTpl" title="将这张图的涂抹位置保存为常用水印模板">💾 存模板</button>
+        <button data-act="zoom" title="放大精修">🔍 放大</button>
+        <button data-act="undo" title="撤销上一笔 (Ctrl/Cmd+Z)">↩ 撤销</button>
+        <button data-act="clear" title="清空全部涂抹">清空</button>
+      </div>
+      <div class="right">
+        <button data-act="compare" style="display:none;">👁️ 对比原图</button>
+        <button data-act="revert" style="display:none;">↺ 还原原图</button>
+        <button data-act="retry" style="display:none; border-color: var(--amber); color: #fcd34d;">🔄 重试</button>
+        <button data-act="run" class="primary">✨ 消除</button>
+        <button data-act="dl" class="success" style="display:none;">⬇️</button>
+        <button data-act="del" class="danger" title="移除">✕</button>
+      </div>
+    </div>
+  `;
+
+  const imgCanvas = card.querySelector('[data-role="img"]');
+  const maskCanvas = card.querySelector('[data-role="mask"]');
+  imgCanvas.width = img.width; imgCanvas.height = img.height;
+  maskCanvas.width = img.width; maskCanvas.height = img.height;
+  imgCanvas.getContext('2d').drawImage(img, 0, 0);
+
+  const item = {
+    id, name, width: img.width, height: img.height,
+    origDataUrl, resultDataUrl: null,
+    imgCanvas, maskCanvas,
+    tplBoxEl: card.querySelector('[data-role="tplBox"]'),
+    maskHistory: [], hasMask: false, status: 'idle', lastError: '', showingOrig: false, cardEl: card,
+  };
+
+  attachDrawing(maskCanvas, item);
+  attachTplBoxDrag(item.tplBoxEl);
+
+  card.querySelector('[data-act="sync"]').onclick = () => syncMaskFromItem(item);
+  card.querySelector('[data-act="saveTpl"]').onclick = () => saveItemMaskAsTemplate(item);
+  card.querySelector('[data-act="zoom"]').onclick = () => openModal(item);
+  card.querySelector('[data-act="undo"]').onclick = () => undoItemMask(item);
+  card.querySelector('[data-act="clear"]').onclick = () => clearItemMask(item);
+  card.querySelector('[data-act="revert"]').onclick = () => revertItemToOriginal(item);
+  card.querySelector('[data-act="retry"]').onclick = () => processSingleItem(item);
+  card.querySelector('[data-act="run"]').onclick = () => processSingleItem(item);
+  card.querySelector('[data-act="dl"]').onclick = () => downloadSingle(item);
+  card.querySelector('[data-act="compare"]').onclick = () => toggleCompare(item);
+  card.querySelector('[data-act="del"]').onclick = () => {
+    state.items = state.items.filter(x => x.id !== item.id);
+    card.remove();
+    updateGlobalUI();
+  };
+
+  state.items.push(item);
+  grid.appendChild(card);
+  syncAllTplBoxes();
+  updateGlobalUI();
+}
+
+function pushMaskHistory(item) {
+  const ctx = item.maskCanvas.getContext('2d');
+  item.maskHistory.push(ctx.getImageData(0, 0, item.maskCanvas.width, item.maskCanvas.height));
+  if (item.maskHistory.length > 20) item.maskHistory.shift();
+}
+
+function checkMaskNonEmpty(canvas) {
+  const d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+  for (let i = 3; i < d.length; i += 16) if (d[i] > 10) return true;
+  return false;
+}
+
+function undoItemMask(item) {
+  if (!item.maskHistory.length) { showToast('没有可撤销的涂抹步骤'); return; }
+  const prev = item.maskHistory.pop();
+  item.maskCanvas.getContext('2d').putImageData(prev, 0, 0);
+  item.hasMask = checkMaskNonEmpty(item.maskCanvas);
+  setItemStatus(item, item.hasMask ? 'masked' : (item.resultDataUrl ? 'done' : 'idle'), item.hasMask ? '已标记' : (item.resultDataUrl ? '已消除 ✓' : '待涂抹'));
+  if (state.modalItemId === item.id) {
+    const mMask = $('modalMaskCanvas');
+    mMask.getContext('2d').clearRect(0, 0, mMask.width, mMask.height);
+    mMask.getContext('2d').drawImage(item.maskCanvas, 0, 0);
+  }
+  updateGlobalUI();
+}
+
+async function revertItemToOriginal(item) {
+  item.resultDataUrl = null;
+  item.showingOrig = false;
+  await drawDataUrlOnCanvas(item.origDataUrl, item.imgCanvas);
+  item.cardEl.querySelector('[data-act="dl"]').style.display = 'none';
+  item.cardEl.querySelector('[data-act="compare"]').style.display = 'none';
+  item.cardEl.querySelector('[data-act="revert"]').style.display = 'none';
+  setItemStatus(item, item.hasMask ? 'masked' : 'idle', item.hasMask ? '已标记' : '待涂抹');
+  updateGlobalUI();
+  showToast(`已将「${item.name}」还原为原图`);
+}
+
+function attachDrawing(canvas, item) {
+  const ctx = canvas.getContext('2d');
+  let drawing = false, startX = 0, startY = 0, snapshot = null;
+  function getPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY, scale: Math.max(scaleX, scaleY) };
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    if (state.isRunning) return;
+    state.lastActiveItemId = item.id;
+    pushMaskHistory(item);
+    canvas.setPointerCapture(e.pointerId);
+    drawing = true;
+    const p = getPos(e);
+    startX = p.x; startY = p.y;
+    if (state.mode === 'brush' || state.mode === 'eraser') {
+      ctx.save();
+      if (state.mode === 'eraser') ctx.globalCompositeOperation = 'destination-out';
+      else ctx.fillStyle = '#ff2a55';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, (state.brushSize * p.scale) / 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    } else {
+      snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    }
+    if (state.mode !== 'eraser') markHasMask(item);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drawing) return;
+    const p = getPos(e);
+    if (state.mode === 'brush' || state.mode === 'eraser') {
+      ctx.save();
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      if (state.mode === 'eraser') { ctx.globalCompositeOperation = 'destination-out'; ctx.strokeStyle = 'rgba(0,0,0,1)'; }
+      else ctx.strokeStyle = '#ff2a55';
+      ctx.lineWidth = state.brushSize * p.scale;
+      ctx.beginPath(); ctx.moveTo(startX, startY); ctx.lineTo(p.x, p.y); ctx.stroke();
+      ctx.restore();
+      startX = p.x; startY = p.y;
+    } else {
+      ctx.putImageData(snapshot, 0, 0);
+      ctx.save(); ctx.fillStyle = '#ff2a55'; ctx.fillRect(startX, startY, p.x - startX, p.y - startY); ctx.restore();
+    }
+  });
+  const endDraw = () => {
+    if (!drawing) return;
+    drawing = false; snapshot = null;
+    if (state.mode === 'eraser') {
+      item.hasMask = checkMaskNonEmpty(item.maskCanvas);
+      if (!item.hasMask) setItemStatus(item, item.resultDataUrl ? 'done' : 'idle', item.resultDataUrl ? '已消除 ✓' : '待涂抹');
+      updateGlobalUI();
+    }
+  };
+  canvas.addEventListener('pointerup', endDraw);
+  canvas.addEventListener('pointercancel', endDraw);
+}
+
+function markHasMask(item) {
+  item.hasMask = true;
+  if (item.status !== 'processing') setItemStatus(item, 'masked', '已标记');
+  updateGlobalUI();
+}
+
+function clearItemMask(item) {
+  pushMaskHistory(item);
+  item.maskCanvas.getContext('2d').clearRect(0, 0, item.maskCanvas.width, item.maskCanvas.height);
+  item.hasMask = false;
+  setItemStatus(item, item.resultDataUrl ? 'done' : 'idle', item.resultDataUrl ? '已消除 ✓' : '待涂抹');
+  updateGlobalUI();
+}
+
+function syncMaskFromItem(srcItem) {
+  if (!srcItem.hasMask) { showToast('请先在这张图上涂抹或框选水印位置'); return; }
+  let count = 0;
+  state.items.forEach(dst => {
+    if (dst.id === srcItem.id) return;
+    pushMaskHistory(dst);
+    const ctx = dst.maskCanvas.getContext('2d');
+    ctx.clearRect(0, 0, dst.maskCanvas.width, dst.maskCanvas.height);
+    ctx.drawImage(srcItem.maskCanvas, 0, 0, dst.maskCanvas.width, dst.maskCanvas.height);
+    markHasMask(dst);
+    count++;
+  });
+  showToast(`已将水印区域按比例同步到其余 ${count} 张图片`);
+}
+
+function setItemStatus(item, status, label) {
+  item.status = status;
+  const pill = item.cardEl.querySelector('[data-role="status"]');
+  pill.className = 'status-pill ' + status;
+  pill.textContent = label;
+  item.cardEl.classList.remove('processing', 'done');
+  if (status === 'processing') item.cardEl.classList.add('processing');
+  if (status === 'done') item.cardEl.classList.add('done');
+}
+
+function drawDataUrlOnCanvas(dataUrl, canvas) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve();
+    };
+    img.src = dataUrl;
+  });
+}
+
+async function processSingleItem(item) {
+  if (!item.hasMask) { showToast(`「${item.name}」还没有涂抹水印区域`); return false; }
+  setItemStatus(item, 'processing', '浏览器 AI 推理中...');
+  try {
+    // Yield a frame so UI updates before WASM work
+    await new Promise(r => setTimeout(r, 30));
+    const resultUrl = await inpaintInBrowser(item.imgCanvas, item.maskCanvas, handleModelStatus);
+    item.resultDataUrl = resultUrl;
+    item.showingOrig = false;
+    await drawDataUrlOnCanvas(resultUrl, item.imgCanvas);
+    item.maskCanvas.getContext('2d').clearRect(0, 0, item.maskCanvas.width, item.maskCanvas.height);
+    item.hasMask = false;
+
+    item.cardEl.querySelector('[data-act="dl"]').style.display = '';
+    item.cardEl.querySelector('[data-act="revert"]').style.display = '';
+    item.cardEl.querySelector('[data-act="retry"]').style.display = 'none';
+    const cmpBtn = item.cardEl.querySelector('[data-act="compare"]');
+    cmpBtn.style.display = '';
+    cmpBtn.textContent = '👁️ 对比原图';
+
+    item.lastError = '';
+    setItemStatus(item, 'done', '已消除 ✓');
+    updateGlobalUI();
+    return true;
+  } catch (err) {
+    console.error(err);
+    item.lastError = err.message || '推理异常';
+    item.cardEl.querySelector('[data-act="retry"]').style.display = '';
+    setItemStatus(item, 'error', '失败(点重试)');
+    showToast(`「${item.name}」处理失败：${item.lastError}`);
+    updateGlobalUI();
+    return false;
+  }
+}
+
+function toggleCompare(item) {
+  if (!item.resultDataUrl) return;
+  item.showingOrig = !item.showingOrig;
+  drawDataUrlOnCanvas(item.showingOrig ? item.origDataUrl : item.resultDataUrl, item.imgCanvas);
+  item.cardEl.querySelector('[data-act="compare"]').textContent = item.showingOrig ? '✨ 查看结果' : '👁️ 对比原图';
+}
+
+async function runBatchItems(targets, labelPrefix = '正在消除') {
+  if (!targets.length) return;
+  state.isRunning = true;
+  updateGlobalUI();
+  const pw = $('progressWrap');
+  pw.classList.add('show');
+  let doneCount = 0;
+
+  try {
+    await ensureModelLoaded(handleModelStatus);
+  } catch (err) {
+    showToast('AI 模型加载失败：' + err.message);
+    state.isRunning = false;
+    updateGlobalUI();
+    return;
+  }
+
+  for (let i = 0; i < targets.length; i++) {
+    const item = targets[i];
+    $('progressText').textContent = `${labelPrefix}：${item.name}`;
+    $('progressCount').textContent = `${i} / ${targets.length}`;
+    $('progressFill').style.width = `${Math.round((i / targets.length) * 100)}%`;
+    if (await processSingleItem(item)) doneCount++;
+  }
+
+  const failCount = targets.length - doneCount;
+  $('progressText').textContent = failCount > 0
+    ? `处理完成：成功 ${doneCount} 张，失败 ${failCount} 张`
+    : `批量处理完成！成功 ${doneCount} / ${targets.length} 张`;
+  $('progressCount').textContent = `${targets.length} / ${targets.length}`;
+  $('progressFill').style.width = '100%';
+  state.isRunning = false;
+  updateGlobalUI();
+  showToast(failCount > 0 ? `成功 ${doneCount} 张，失败 ${failCount} 张` : `全部完成！共成功消除 ${doneCount} 张图片`);
+}
+
+$('btnRunAll').onclick = async () => {
+  if (state.tplBox.active) confirmTplBoxToAll(true);
+  const targets = state.items.filter(x => x.hasMask);
+  if (!targets.length) { showToast('请先涂抹区域，或点「自动检测水印」/ 水印模板'); return; }
+  await runBatchItems(targets, '正在消除');
+};
+
+$('btnRetryFailed').onclick = async () => {
+  const failed = state.items.filter(x => x.status === 'error' && x.hasMask);
+  if (failed.length) await runBatchItems(failed, '正在重试');
+};
+
+function convertDataUrlFormat(dataUrl, fmt) {
+  if (fmt === 'png') return Promise.resolve({ dataUrl, ext: 'png' });
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0);
+      resolve({ dataUrl: c.toDataURL('image/jpeg', 0.92), ext: 'jpg' });
+    };
+    img.src = dataUrl;
+  });
+}
+
+async function downloadSingle(item) {
+  if (!item.resultDataUrl) return;
+  const fmt = $('exportFormat').value;
+  const { dataUrl, ext } = await convertDataUrlFormat(item.resultDataUrl, fmt);
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = `${item.name.replace(/\.[^.]+$/, '')}_已消除.${ext}`;
+  a.click();
+}
+
+$('btnDownloadZip').onclick = async () => {
+  const ready = state.items.filter(x => x.resultDataUrl);
+  if (!ready.length) return;
+  const fmt = $('exportFormat').value;
+  showToast(`正在浏览器本地打包 ${fmt.toUpperCase()} ZIP...`);
+  try {
+    const zip = new JSZip();
+    const used = new Set();
+    for (let i = 0; i < ready.length; i++) {
+      const x = ready[i];
+      const { dataUrl, ext } = await convertDataUrlFormat(x.resultDataUrl, fmt);
+      let fname = `${x.name.replace(/\.[^.]+$/, '')}_已消除.${ext}`;
+      if (used.has(fname)) fname = `${x.name.replace(/\.[^.]+$/, '')}_${i + 1}_已消除.${ext}`;
+      used.add(fname);
+      zip.file(fname, dataUrl.split(',')[1], { base64: true });
+    }
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `AI批量消除_${ready.length}张_${fmt.toUpperCase()}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast('打包失败：' + err.message);
+  }
+};
+
+$('btnClearAll').onclick = () => {
+  state.items = []; grid.innerHTML = '';
+  $('progressWrap').classList.remove('show');
+  state.tplBox.active = false;
+  syncAllTplBoxes();
+  updateGlobalUI();
+};
+
+function updateGlobalUI() {
+  const count = state.items.length;
+  const maskedCount = state.items.filter(x => x.hasMask).length;
+  const doneCount = state.items.filter(x => x.resultDataUrl).length;
+  const errCount = state.items.filter(x => x.status === 'error' && x.hasMask).length;
+
+  dropzone.classList.toggle('compact', count > 0);
+  $('hintBar').style.display = count > 0 ? 'flex' : 'none';
+  $('templateBar').classList.toggle('show', count > 0);
+  $('btnAutoDetect').disabled = state.isRunning || count < 2;
+
+  const retryBtn = $('btnRetryFailed');
+  retryBtn.style.display = errCount > 0 ? '' : 'none';
+  retryBtn.disabled = state.isRunning;
+  retryBtn.textContent = `🔄 重试失败项 (${errCount}张)`;
+
+  const readyToRun = maskedCount > 0 || (state.tplBox.active && count > 0);
+  const runCount = state.tplBox.active ? count : maskedCount;
+  $('btnRunAll').disabled = state.isRunning || !readyToRun;
+  $('btnRunAll').textContent = readyToRun ? `🚀 一键批量消除 (${runCount}张)` : '🚀 一键批量消除';
+  $('btnDownloadZip').disabled = state.isRunning || doneCount === 0;
+  $('btnDownloadZip').textContent = doneCount > 0 ? `📦 打包下载 (${doneCount}张)` : '📦 打包下载 (ZIP)';
+  $('btnClearAll').disabled = state.isRunning || count === 0;
+}
+
+// Templates & resizable synced red box
+const TPL_STORAGE_KEY = 'ai_wm_remover_templates_v1';
+const BUILTIN_TEMPLATES = [
+  { id: 'preset_br', name: '右下角 AI 水印', builtin: true, rects: [[0.76, 0.90, 0.22, 0.08]] },
+  { id: 'preset_bl', name: '左下角水印', builtin: true, rects: [[0.02, 0.88, 0.26, 0.10]] },
+  { id: 'preset_tr', name: '右上角水印', builtin: true, rects: [[0.72, 0.02, 0.26, 0.10]] },
+  { id: 'preset_tl', name: '左上角水印', builtin: true, rects: [[0.02, 0.02, 0.26, 0.10]] },
+  { id: 'preset_bottom', name: '底部通栏文字', builtin: true, rects: [[0.05, 0.89, 0.90, 0.09]] },
+];
+const loadCustomTemplates = () => { try { return JSON.parse(localStorage.getItem(TPL_STORAGE_KEY) || '[]'); } catch { return []; } };
+const saveCustomTemplates = (list) => localStorage.setItem(TPL_STORAGE_KEY, JSON.stringify(list));
+
+function renderTemplateBar() {
+  const wrap = $('templateList');
+  wrap.innerHTML = '';
+  [...BUILTIN_TEMPLATES, ...loadCustomTemplates()].forEach(tpl => {
+    const chip = document.createElement('span');
+    chip.className = 'tpl-chip';
+    const label = document.createElement('span');
+    label.textContent = (tpl.builtin ? '⚡ ' : '⭐ ') + tpl.name;
+    label.onclick = () => applyTemplateToAll(tpl);
+    chip.appendChild(label);
+    if (!tpl.builtin) {
+      const del = document.createElement('span');
+      del.className = 'del-tpl'; del.textContent = '×';
+      del.onclick = (e) => {
+        e.stopPropagation();
+        saveCustomTemplates(loadCustomTemplates().filter(x => x.id !== tpl.id));
+        renderTemplateBar();
+      };
+      chip.appendChild(del);
+    }
+    wrap.appendChild(chip);
+  });
+}
+renderTemplateBar();
+
+function syncAllTplBoxes() {
+  const b = state.tplBox;
+  $('tplBoxActions').classList.toggle('show', b.active && state.items.length > 0);
+  state.items.forEach(item => {
+    const el = item.tplBoxEl;
+    if (!el) return;
+    el.classList.toggle('active', b.active);
+    if (b.active) {
+      el.style.left = (b.x * 100) + '%'; el.style.top = (b.y * 100) + '%';
+      el.style.width = (b.w * 100) + '%'; el.style.height = (b.h * 100) + '%';
+    }
+  });
+}
+
+function attachTplBoxDrag(boxEl) {
+  let dragType = null, startX = 0, startY = 0, orig = null, parentRect = null;
+  boxEl.addEventListener('pointerdown', (e) => {
+    e.stopPropagation(); e.preventDefault();
+    const handle = e.target.closest('.tpl-handle');
+    dragType = handle ? handle.dataset.dir : 'move';
+    startX = e.clientX; startY = e.clientY;
+    orig = { ...state.tplBox };
+    parentRect = boxEl.parentElement.getBoundingClientRect();
+    boxEl.setPointerCapture(e.pointerId);
+  });
+  boxEl.addEventListener('pointermove', (e) => {
+    if (!dragType || !parentRect) return;
+    e.stopPropagation();
+    const dx = (e.clientX - startX) / parentRect.width, dy = (e.clientY - startY) / parentRect.height;
+    let { x, y, w, h } = orig;
+    if (dragType === 'move') {
+      x = Math.max(0, Math.min(1 - w, x + dx));
+      y = Math.max(0, Math.min(1 - h, y + dy));
+    } else {
+      if (dragType.includes('e')) w = Math.max(0.03, Math.min(1 - x, w + dx));
+      if (dragType.includes('s')) h = Math.max(0.03, Math.min(1 - y, h + dy));
+      if (dragType.includes('w')) { const nx = Math.max(0, Math.min(x + w - 0.03, x + dx)); w += (x - nx); x = nx; }
+      if (dragType.includes('n')) { const ny = Math.max(0, Math.min(y + h - 0.03, y + dy)); h += (y - ny); y = ny; }
+    }
+    state.tplBox = { active: true, x, y, w, h };
+    syncAllTplBoxes();
+  });
+  const end = () => { dragType = null; orig = null; parentRect = null; };
+  boxEl.addEventListener('pointerup', end);
+  boxEl.addEventListener('pointercancel', end);
+}
+
+function confirmTplBoxToAll(silent = false) {
+  if (!state.tplBox.active || !state.items.length) return;
+  const { x, y, w, h } = state.tplBox;
+  state.items.forEach(item => {
+    pushMaskHistory(item);
+    const ctx = item.maskCanvas.getContext('2d');
+    ctx.fillStyle = '#ff2a55';
+    ctx.fillRect(x * item.maskCanvas.width, y * item.maskCanvas.height, w * item.maskCanvas.width, h * item.maskCanvas.height);
+    markHasMask(item);
+  });
+  state.tplBox.active = false;
+  syncAllTplBoxes(); updateGlobalUI();
+  if (!silent) showToast(`已应用红框到全部 ${state.items.length} 张图片`);
+}
+
+$('btnConfirmTplBox').onclick = () => confirmTplBoxToAll(false);
+$('btnCancelTplBox').onclick = () => { state.tplBox.active = false; syncAllTplBoxes(); updateGlobalUI(); };
+$('btnSaveTplBox').onclick = () => {
+  if (!state.tplBox.active) return;
+  const name = prompt('给这个自定义位置模板起个名字：');
+  if (!name || !name.trim()) return;
+  const { x, y, w, h } = state.tplBox;
+  const list = loadCustomTemplates();
+  list.push({ id: 'custom_' + Date.now(), name: name.trim(), builtin: false, rects: [[x, y, w, h]] });
+  saveCustomTemplates(list); renderTemplateBar();
+  showToast(`已保存模板「${name.trim()}」`);
+};
+
+function saveItemMaskAsTemplate(item) {
+  if (!item.hasMask) { showToast('请先涂抹水印区域'); return; }
+  const name = prompt('给这个常用水印模板起个名字：');
+  if (!name || !name.trim()) return;
+  const tmp = document.createElement('canvas'); tmp.width = 512; tmp.height = 512;
+  tmp.getContext('2d').drawImage(item.maskCanvas, 0, 0, 512, 512);
+  const list = loadCustomTemplates();
+  list.push({ id: 'custom_' + Date.now(), name: name.trim(), builtin: false, maskPng: tmp.toDataURL('image/png') });
+  saveCustomTemplates(list); renderTemplateBar();
+  showToast(`已保存模板「${name.trim()}」`);
+}
+
+function applyTemplateToAll(tpl) {
+  if (!state.items.length) return;
+  if (tpl.rects && tpl.rects.length) {
+    const [x, y, w, h] = tpl.rects[0];
+    state.tplBox = { active: true, x, y, w, h };
+    syncAllTplBoxes(); updateGlobalUI();
+    showToast(`已打开「${tpl.name}」可调红框，拖动任意图片边角即可全图同步缩放`);
+  } else if (tpl.maskPng) {
+    state.tplBox.active = false; syncAllTplBoxes();
+    const img = new Image();
+    img.onload = () => {
+      state.items.forEach(item => {
+        pushMaskHistory(item);
+        const ctx = item.maskCanvas.getContext('2d');
+        ctx.clearRect(0, 0, item.maskCanvas.width, item.maskCanvas.height);
+        ctx.drawImage(img, 0, 0, item.maskCanvas.width, item.maskCanvas.height);
+        markHasMask(item);
+      });
+      showToast(`已套用模板「${tpl.name}」到全部 ${state.items.length} 张图片`);
+    };
+    img.src = tpl.maskPng;
+  }
+}
+
+// Pure-JS Browser Auto-Detect Watermark
+$('btnAutoDetect').onclick = async () => {
+  if (state.items.length < 2) { showToast('至少需要 2 张含相同固定水印的图片'); return; }
+  const btn = $('btnAutoDetect');
+  btn.disabled = true; btn.textContent = '🤖 正在本地分析...';
+  await new Promise(r => setTimeout(r, 30));
+  try {
+    const res = detectCommonWatermarkInBrowser(state.items.map(x => x.imgCanvas));
+    if (!res.found) {
+      showToast('未检测到明显的固定位置共同水印，建议点下方模板红框或手动涂抹');
+      return;
+    }
+    const maskImg = new Image();
+    maskImg.onload = () => {
+      state.items.forEach(item => {
+        pushMaskHistory(item);
+        const ctx = item.maskCanvas.getContext('2d');
+        ctx.clearRect(0, 0, item.maskCanvas.width, item.maskCanvas.height);
+        ctx.drawImage(maskImg, 0, 0, item.maskCanvas.width, item.maskCanvas.height);
+        markHasMask(item);
+      });
+      showToast(`已精准锁定共同水印（占比 ${res.coverage_pct}%），可直接点「一键批量消除」！`);
+    };
+    maskImg.src = res.mask;
+  } finally {
+    btn.textContent = '🤖 自动检测水印';
+    updateGlobalUI();
+  }
+};
+
+// Zoom Modal
+let modalCanvasBound = false;
+function openModal(item) {
+  state.modalItemId = item.id;
+  $('modalTitle').textContent = `放大精修：${item.name}`;
+  const mImg = $('modalImgCanvas'), mMask = $('modalMaskCanvas');
+  mImg.width = item.width; mImg.height = item.height;
+  mMask.width = item.width; mMask.height = item.height;
+  mImg.getContext('2d').drawImage(item.imgCanvas, 0, 0);
+  mMask.getContext('2d').clearRect(0, 0, mMask.width, mMask.height);
+  mMask.getContext('2d').drawImage(item.maskCanvas, 0, 0);
+
+  if (!modalCanvasBound) {
+    modalCanvasBound = true;
+    const getCur = () => state.items.find(x => x.id === state.modalItemId);
+    const ctx = mMask.getContext('2d');
+    let drawing = false, sx = 0, sy = 0, snap = null;
+    function getPos(e) {
+      const r = mMask.getBoundingClientRect();
+      const scX = mMask.width / r.width, scY = mMask.height / r.height;
+      return { x: (e.clientX - r.left) * scX, y: (e.clientY - r.top) * scY, scale: Math.max(scX, scY) };
+    }
+    function syncBack(isEraserEnd = false) {
+      const cur = getCur(); if (!cur) return;
+      const c = cur.maskCanvas.getContext('2d');
+      c.clearRect(0, 0, cur.maskCanvas.width, cur.maskCanvas.height);
+      c.drawImage(mMask, 0, 0);
+      if (isEraserEnd) {
+        cur.hasMask = checkMaskNonEmpty(cur.maskCanvas);
+        if (!cur.hasMask) setItemStatus(cur, cur.resultDataUrl ? 'done' : 'idle', cur.resultDataUrl ? '已消除 ✓' : '待涂抹');
+        updateGlobalUI();
+      } else if (state.mode !== 'eraser') markHasMask(cur);
+    }
+    mMask.addEventListener('pointerdown', (e) => {
+      const cur = getCur();
+      if (cur) { state.lastActiveItemId = cur.id; pushMaskHistory(cur); }
+      mMask.setPointerCapture(e.pointerId);
+      drawing = true; const p = getPos(e); sx = p.x; sy = p.y;
+      if (state.mode === 'brush' || state.mode === 'eraser') {
+        ctx.save();
+        if (state.mode === 'eraser') ctx.globalCompositeOperation = 'destination-out';
+        else ctx.fillStyle = '#ff2a55';
+        ctx.beginPath(); ctx.arc(p.x, p.y, (state.brushSize * p.scale) / 2, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      } else snap = ctx.getImageData(0, 0, mMask.width, mMask.height);
+      syncBack();
+    });
+    mMask.addEventListener('pointermove', (e) => {
+      if (!drawing) return;
+      const p = getPos(e);
+      if (state.mode === 'brush' || state.mode === 'eraser') {
+        ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        if (state.mode === 'eraser') { ctx.globalCompositeOperation = 'destination-out'; ctx.strokeStyle = 'rgba(0,0,0,1)'; }
+        else ctx.strokeStyle = '#ff2a55';
+        ctx.lineWidth = state.brushSize * p.scale;
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(p.x, p.y); ctx.stroke();
+        ctx.restore(); sx = p.x; sy = p.y;
+      } else {
+        ctx.putImageData(snap, 0, 0); ctx.fillStyle = '#ff2a55'; ctx.fillRect(sx, sy, p.x - sx, p.y - sy);
+      }
+      syncBack();
+    });
+    const end = () => { if (!drawing) return; drawing = false; snap = null; syncBack(state.mode === 'eraser'); };
+    mMask.addEventListener('pointerup', end);
+    mMask.addEventListener('pointercancel', end);
+  }
+  $('modalBackdrop').classList.add('open');
+}
+function closeModal() { $('modalBackdrop').classList.remove('open'); state.modalItemId = null; }
+$('modalClose').onclick = closeModal;
+$('modalBackdrop').onclick = (e) => { if (e.target === $('modalBackdrop')) closeModal(); };
+$('modalUndo').onclick = () => { const cur = state.items.find(x => x.id === state.modalItemId); if (cur) undoItemMask(cur); };
+$('modalClearMask').onclick = () => {
+  const cur = state.items.find(x => x.id === state.modalItemId); if (!cur) return;
+  clearItemMask(cur);
+  const mMask = $('modalMaskCanvas'); mMask.getContext('2d').clearRect(0, 0, mMask.width, mMask.height);
+};
+$('modalSyncAll').onclick = () => { const cur = state.items.find(x => x.id === state.modalItemId); if (cur) syncMaskFromItem(cur); };
+$('modalRunOne').onclick = async () => {
+  const cur = state.items.find(x => x.id === state.modalItemId); if (!cur) return;
+  if (await processSingleItem(cur)) {
+    $('modalImgCanvas').getContext('2d').drawImage(cur.imgCanvas, 0, 0);
+    const mMask = $('modalMaskCanvas'); mMask.getContext('2d').clearRect(0, 0, mMask.width, mMask.height);
+  }
+};
+</script>
+</body>
+</html>
